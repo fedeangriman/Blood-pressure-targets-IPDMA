@@ -1,6 +1,6 @@
 ############################### R script #####################################
 ## BP targets for adults in shock IPDMA                                     ##
-## Revision NEJM Evidence, version 1.8; October 2024                       ##
+## Revision NEJM Evidence, version 1.8; October 2024                        ##
 ## This code:                                                               ##
 ### Imports a previously generated combined dataset                         ##
 ### Implements Bayesian random effects models                               ##
