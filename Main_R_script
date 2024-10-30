@@ -1,0 +1,1050 @@
+############################### R script #####################################
+## BP targets for adults in shock IPDMA                                     ##
+## NEJM Evidence; version 2.0 October 2024                                  ##
+## This code:                                                               ##
+### Imports a previously generated combined dataset                         ##
+### Implements Bayesian random effects models                               ##
+### Explores sources of HTE (a-priori and ad-hoc)                           ##
+################################# IPDMA ######################################
+
+# Importing data----
+# Cleaning of dataset done previously (input files are raw from 3 trials)
+# Libraries already loaded in this script
+source("2. 65_IPDMA - Script dataset_generation.R")
+
+# Description, priors, and study-level analyses----
+## Overall summary and NAs by variable
+summary(data_analysis)
+miss_var_summary(data_analysis)
+
+## Table one (baseline description)----
+description <- print(CreateTableOne(
+  data = data_analysis,
+  vars = c("age", "female", "apache", "cad", "htn", "chf", "ckd", "weight", "rrt", "sepsis", "study"),
+  strata = c("exposure"), 
+  factorVars = c("female", "htn", "chf","rrt", "sepsis", "cad", "ckd", "study"),
+  addOverall = TRUE),
+  nonnormal = c("apache"),
+  test = FALSE, 
+  smd = TRUE)
+
+## Exploration of priors----
+## I.e., 1) weakly informative one, 2) optimistic prior, 3) skeptical prior, 4) pessimistic prior
+optimistic <- rnorm(10000,-0.2, 0.4)
+neutral <- rnorm(10000, 0, 5)
+skeptical <- rnorm(10000, 0, 0.35)
+pessimistic <- rnorm(10000, 0.2, 0.4)
+
+describe(optimistic)
+mean(exp(optimistic) > 1)
+exp(quantile(optimistic, 0.025))
+exp(quantile(optimistic, 0.5))
+exp(quantile(optimistic, 0.975))
+
+describe(exp(neutral) > 1)
+mean(neutral > 0)
+exp(quantile(neutral, 0.025))
+exp(quantile(neutral, 0.5))
+exp(quantile(neutral, 0.975))
+
+describe(exp(skeptical) > 1)
+mean(skeptical > 0)
+exp(quantile(skeptical, 0.025))
+exp(quantile(skeptical, 0.5))
+exp(quantile(skeptical, 0.975))
+
+describe(exp(pessimistic) > 1)
+mean(pessimistic > 0)
+exp(quantile(pessimistic, 0.025))
+exp(quantile(pessimistic, 0.5))
+exp(quantile(pessimistic, 0.975))
+
+## Recreating individual study results----
+### Individual trials----
+data_65 <- data_analysis %>% filter(study==0) # Change here to evaluate != trials
+
+# No models; RR and frequentist 95% confidence interval
+source("3. 65_IPDMA - Two_by_two.R")
+
+# With models (Bayesian log-binomial model)
+trial_fit <- stan_glm(death_90 ~ exposure, 
+                data = data_65, 
+                family = binomial(link = "log"),
+                prior = normal(0, 5), 
+                prior_intercept = normal(0, 2.5),
+                chains = 4, 
+                iter = 2000, 
+                seed = 123)
+summary(trial_fit) 
+exp_coefficients <- exp(coef(trial_fit))
+exp_coefficients
+exp_conf_int <- exp(posterior_interval(trial_fit, prob = 0.95))
+exp_conf_int
+
+# Probability of benefit (using function for ease)
+source("4. 65_IPDMA - Bayesian probabilities functions.R")
+bayesian_probability(0.93, 1.02)
+
+## Meta-analysis, study level approach----
+## Used as benchmark for main IPDMA analysis
+### Frequentist two stage MA----
+source("5. 65_IPDMA - Datasets_two_hte.R")
+
+meta_analysis <- metagen(
+  log_rr, 
+  upper = log(upper_ci), 
+  lower = log(lower_ci),
+  data = data_two,
+  studlab = paste("Trial", 1:3),
+  sm = "RR", 
+  method.tau = "ML"
+)
+summary(meta_analysis)
+
+### Bayesian random effects meta-analysis----
+model <- brm(
+  log_rr | se(se) ~ 1 + (1 | trial),  
+  data = data_two,
+  prior = c(
+    prior(normal(0, 5), class = "Intercept"), 
+    prior(cauchy(0, 0.295), class=sd)),
+  family = gaussian(),
+  control = list(adapt_delta = 0.90), 
+  chains = 4,          
+  cores = 4,           
+  iter = 10000          
+)
+summary(model)
+plot(model)
+
+### Bayesian fixed effects meta-analysis----
+model <- brm(
+  log_rr | se(se) ~ 1,  
+  data = data_two,
+  prior = c(prior(normal(0, 5), class = "Intercept")), 
+  family = gaussian(),
+  chains = 4,          
+  cores = 4,           
+  iter = 10000
+  )
+summary(model)
+
+# Probability of benefit in study-level Bayesian MAs (both random and fixed effects)
+bayesian_probability(0.93, 1.09)
+bayesian_probability(0.93, 1.01)
+
+# Main analysis----
+## Bayesian log-binomial model with random effects for treatment within study----
+random_rr = stan_glmer(formula = death_90 ~ exposure + (1 + exposure | study), 
+                       data = data_analysis, 
+                       family = binomial(link="log"), 
+                       prior = normal(location = 0, scale = 5),  
+                       warmup = 500, 
+                       iter = 2000,
+                       cores = 4, 
+                       seed = 123)
+random_rr
+?prior_summary.stanreg
+ci95 = posterior_interval(random_rr, prob=0.95)
+exp(ci95)
+summary(random_rr)
+samples_initial = as.matrix(random_rr)
+samples = samples_initial[,2]
+
+# Visualizing priors and posteriors
+posterior_vs_prior(random_rr)
+
+# Median and 95% credible intervals 
+exp(quantile(samples, 0.025))
+exp(quantile(samples, 0.5))
+exp(quantile(samples, 0.975))
+
+# Probability of benefit and harm
+mean(samples < 0)
+mean(samples > 0)
+
+# Absolute risk reduction
+ar = exp(samples) * 0.4
+arr = ar - 0.4
+quantile(arr, 0.025)
+quantile(arr, 0.5)
+quantile(arr, 0.975)
+
+## Secondary and sensitivity analysis----
+### Fixed effect Bayesian log-binomial model with random effects for study----
+random_rr = stan_glmer(formula = death_90 ~ exposure + (1 | study), 
+                       data = data_analysis, 
+                       family = binomial(link="log"), 
+                       prior = normal(location = 0, scale = 5), 
+                       warmup = 500, 
+                       iter = 2000,
+                       cores = 4, 
+                       seed = 123)
+random_rr
+ci95 = posterior_interval(random_rr, prob=0.95)
+exp(ci95)
+summary(random_rr)
+samples_initial = as.matrix(random_rr)
+samples = samples_initial[,2]
+
+# Median and 95% credible intervals 
+exp(quantile(samples, 0.025))
+exp(quantile(samples, 0.5))
+exp(quantile(samples, 0.975))
+
+# Probability of benefit and harm
+mean(samples < 0)
+mean(samples > 0)
+
+# Absolute risk reduction
+ar = exp(samples) * 0.4
+arr = ar - 0.4
+quantile(arr, 0.025)
+quantile(arr, 0.5)
+quantile(arr, 0.975)
+
+### Bayesian log-binomial model with random effects for study and site----
+random_rr = stan_glmer(formula = death_90 ~ exposure + (1 | study) + (1 | study:site), 
+                       data = data_analysis, 
+                       family = binomial(link="log"), 
+                       prior = normal(location = 0, scale = 5), 
+                       warmup = 500, 
+                       iter = 2000,
+                       cores = 4, 
+                       seed = 123)
+random_rr
+?prior_summary.stanreg
+ci95 = posterior_interval(random_rr, prob=0.95)
+exp(ci95)
+summary(random_rr)
+samples_initial = as.matrix(random_rr)
+samples = samples_initial[,2]
+
+# Visualizing priors and posteriors
+posterior_vs_prior(random_rr)
+
+# Median and 95% credible intervals 
+exp(quantile(samples, 0.025))
+exp(quantile(samples, 0.5))
+exp(quantile(samples, 0.975))
+
+# Probability of benefit and harm
+mean(samples < 0)
+mean(samples > 0)
+
+# Absolute risk reduction
+ar = exp(samples) * 0.4
+arr = ar - 0.4
+quantile(arr, 0.025)
+quantile(arr, 0.5)
+quantile(arr, 0.975)
+
+### Bayesian log-binomial adjusting for age, sex, comorbidities, and severity----
+### Not including APACHE because of potential collinearity and lack of convergence
+random_rr = stan_glmer(formula = death_90 ~ exposure + age + female + cad + htn + ckd
+                       + chf + rrt + sepsis + (1 + exposure | study), 
+                       data = data_analysis, 
+                       family = binomial(link="log"), 
+                       prior = normal(location = 0, scale = 5),
+                       warmup = 500, 
+                       iter = 2000,
+                       cores = 4,
+                       QR = TRUE,
+                       seed = 1234)
+random_rr
+ci95 = posterior_interval(random_rr, prob=0.95)
+exp(ci95)
+summary(random_rr)
+samples_initial = as.matrix(random_rr)
+samples = samples_initial[,2]
+
+# Median and 95% credible intervals 
+exp(quantile(samples, 0.025))
+exp(quantile(samples, 0.5))
+exp(quantile(samples, 0.975))
+
+# Probability of benefit and harm 
+mean(samples < 0)
+mean(samples > 0)
+
+# Absolute risk reduction
+ar = exp(samples) * 0.4
+arr = ar - 0.4
+quantile(arr, 0.025)
+quantile(arr, 0.5)
+quantile(arr, 0.975)
+
+### Bayesian log-binomial adjusting for APACHE----
+### Some changes needed for computation:
+#### Scaling + use of weak priors for intercept + use of Poisson distribution
+data_analysis$apache_scaled <- scale(data_analysis$apache)
+weak_prior_intercept <- normal(location = 0, scale = 10) 
+random_rr = stan_glmer(formula = death_90 ~ exposure + apache_scaled + (1 + exposure | study), 
+                       data = data_analysis, 
+                       family = poisson(link="log"), 
+                       prior_intercept = weak_prior_intercept,
+                       warmup = 500, 
+                       iter = 2000,
+                       cores = 4,
+                       QR = TRUE,
+                       seed = 1234)
+random_rr
+ci95 = posterior_interval(random_rr, prob=0.95)
+exp(ci95)
+summary(random_rr)
+samples_initial = as.matrix(random_rr)
+samples = samples_initial[,2]
+
+# Median and 95% credible intervals 
+exp(quantile(samples, 0.025))
+exp(quantile(samples, 0.5))
+exp(quantile(samples, 0.975))
+
+# Probability of benefit and harm 
+mean(samples < 0)
+mean(samples > 0)
+
+# Absolute risk reduction
+ar = exp(samples) * 0.4
+arr = ar - 0.4
+quantile(arr, 0.025)
+quantile(arr, 0.5)
+quantile(arr, 0.975)
+
+### Bayesian log-binomial with random effects for site (NOT study)----
+random_rr = stan_glmer(formula = death_90 ~ exposure + (1 | site), 
+                       data = data_analysis, 
+                       family = binomial(link="log"), 
+                       prior = normal(location = 0, scale = 5),
+                       warmup = 500, 
+                       iter = 2000,
+                       cores = 4, 
+                       seed = 123)
+random_rr
+ci95 = posterior_interval(random_rr, prob=0.95)
+exp(ci95)
+summary(random_rr)
+samples_initial = as.matrix(random_rr)
+samples = samples_initial[,2]
+
+# Median and 95% credible intervals 
+exp(quantile(samples, 0.025))
+exp(quantile(samples, 0.5))
+exp(quantile(samples, 0.975))
+
+# Absolute risk reduction
+ar = exp(samples) * 0.4
+arr = ar - 0.4
+quantile(arr, 0.025)
+quantile(arr, 0.5)
+quantile(arr, 0.975)
+
+# Probability of benefit and harm
+mean(samples < 0)
+mean(samples > 0)
+
+### Excluding trials due to != in the randomized interventions----
+data_pam <- data_analysis %>% filter(study!=0) # Can change here for each trial
+random_rr = stan_glmer(formula = death_90 ~ exposure + (1 + exposure | study), 
+                       data = data_pam, 
+                       family = binomial(link="log"), 
+                       prior = normal(location = 0, scale = 5),
+                       warmup = 500, 
+                       iter = 2000,
+                       cores = 4, 
+                       seed = 123)
+random_rr
+ci95 = posterior_interval(random_rr, prob=0.95)
+exp(ci95)
+summary(random_rr)
+samples_initial = as.matrix(random_rr)
+samples = samples_initial[,2]
+
+# Median and 95% credible intervals 
+exp(quantile(samples, 0.025))
+exp(quantile(samples, 0.5))
+exp(quantile(samples, 0.975))
+
+# Probability of benefit and harm
+mean(samples < 0)
+mean(samples > 0)
+
+# Absolute risk reduction
+ar = exp(samples) * 0.4
+arr = ar - 0.4
+quantile(arr, 0.025)
+quantile(arr, 0.5)
+quantile(arr, 0.975)
+
+### Sensitivity analyses using different prior beliefs----
+#### Using an optimistic prior----
+random_rr = stan_glmer(formula = death_90 ~ exposure + (1 + exposure | study), 
+                       data = data_analysis, 
+                       family = binomial(link="log"), 
+                       prior = normal(location = -0.2, scale = 0.4), 
+                       warmup = 500, 
+                       iter = 2000,
+                       cores = 4, 
+                       seed = 123)
+random_rr
+ci95 = posterior_interval(random_rr, prob=0.95)
+exp(ci95)
+summary(random_rr)
+samples_initial = as.matrix(random_rr)
+samples = samples_initial[,2]
+
+# Median and 95% credible intervals 
+exp(quantile(samples, 0.025))
+exp(quantile(samples, 0.5))
+exp(quantile(samples, 0.975))
+
+# Probability of benefit and harm
+mean(samples < 0)
+mean(samples > 0)
+
+# Absolute risk reduction
+ar = exp(samples) * 0.4
+arr = ar - 0.4
+quantile(arr, 0.025)
+quantile(arr, 0.5)
+quantile(arr, 0.975)
+
+#### Using a skeptical prior----
+random_rr = stan_glmer(formula = death_90 ~ exposure + (1 + exposure | study), 
+                       data = data_analysis, 
+                       family = binomial(link="log"), 
+                       prior = normal(location = 0, scale = 0.35),
+                       warmup = 500, 
+                       iter = 2000,
+                       cores = 4, 
+                       seed = 123)
+random_rr
+ci95 = posterior_interval(random_rr, prob=0.95)
+exp(ci95)
+summary(random_rr)
+samples_initial = as.matrix(random_rr)
+samples = samples_initial[,2]
+
+# Median and 95% credible intervals 
+exp(quantile(samples, 0.025))
+exp(quantile(samples, 0.5))
+exp(quantile(samples, 0.975))
+
+# Probability of benefit and harm
+mean(samples < 0)
+mean(samples > 0)
+
+# Absolute risk reduction
+ar = exp(samples) * 0.4
+arr = ar - 0.4
+quantile(arr, 0.025)
+quantile(arr, 0.5)
+quantile(arr, 0.975)
+
+#### Using a pessimist prior----
+random_rr = stan_glmer(formula = death_90 ~ exposure + (1 + exposure | study), 
+                       data = data_analysis, 
+                       family = binomial(link="log"), 
+                       prior = normal(location = 0.2, scale = 0.4), 
+                       warmup = 500,
+                       iter = 2000,
+                       cores = 4, 
+                       seed = 123)
+random_rr
+ci95 = posterior_interval(random_rr, prob=0.95)
+exp(ci95)
+summary(random_rr)
+samples_initial = as.matrix(random_rr)
+samples = samples_initial[,2]
+
+# Median and 95% credible intervals 
+exp(quantile(samples, 0.025))
+exp(quantile(samples, 0.5))
+exp(quantile(samples, 0.975))
+
+# Probability of benefit and harm
+mean(samples < 0)
+mean(samples > 0)
+
+# Absolute risk reduction
+ar = exp(samples) * 0.4
+arr = ar - 0.4
+quantile(arr, 0.025)
+quantile(arr, 0.5)
+quantile(arr, 0.975)
+
+#### Using a strong pessimist prior----
+#### This was ad-hoc (i.e., not in SAP)
+random_rr = stan_glmer(formula = death_90 ~ exposure + (1 + exposure | study), 
+                       data = data_analysis, 
+                       family = binomial(link="log"), 
+                       prior = normal(location = 0.2, scale = 0.2), 
+                       warmup = 500,
+                       iter = 2000,
+                       cores = 4, 
+                       seed = 123)
+random_rr
+ci95 = posterior_interval(random_rr, prob=0.95)
+exp(ci95)
+summary(random_rr)
+samples_initial = as.matrix(random_rr)
+samples = samples_initial[,2]
+
+# Median and 95% credible intervals 
+exp(quantile(samples, 0.025))
+exp(quantile(samples, 0.5))
+exp(quantile(samples, 0.975))
+
+# Probability of benefit and harm
+mean(samples < 0)
+mean(samples > 0)
+
+# Absolute risk reduction
+ar = exp(samples) * 0.4
+arr = ar - 0.4
+quantile(arr, 0.025)
+quantile(arr, 0.5)
+quantile(arr, 0.975)
+
+# A-priori HTE analysis----
+### Subgroups of interest: 
+#### Age < 65 vs. >= 65 (better in older)
+#### HTN yes vs. no (better in HTN)
+#### CHF yes vs. no (better in CHF)
+#### Sepsis yes vs. no (better in sepsis)
+#### APACHE high vs. low (defined using median; better with increasing severity)
+#### CKD yes vs. no (better in CKD)
+
+## Interaction by Age----
+### Modified Poisson used for computation as needed
+random_rr = stan_glmer(formula = death_90 ~ exposure + age_cat + ave_age + intx_age + intx_age_between + (1 + exposure | study), 
+                       data = data_hte, 
+                       family = poisson(link="log"), 
+                       prior = normal(location = 0, scale = 5), 
+                       warmup = 500, 
+                       iter = 2000,
+                       cores = 4, 
+                       seed = 123)
+random_rr
+ci95 = posterior_interval(random_rr, prob=0.95)
+exp(ci95)
+summary(random_rr)
+samples_initial = as.matrix(random_rr)
+samples_expo = samples_initial[,2] # Location of exposure
+samples_intx = samples_initial[,5] # Location of within interaction
+samples = samples_expo + samples_intx
+
+# Median and 95% credible intervals in age_cat = 1
+exp(quantile(samples, 0.025))
+exp(quantile(samples, 0.5))
+exp(quantile(samples, 0.975))
+mean(samples < 0)
+
+# Median and 95% credible intervals in age_cat = 0
+exp(quantile(samples_expo, 0.025))
+exp(quantile(samples_expo, 0.5))
+exp(quantile(samples_expo, 0.975))
+mean(samples_expo < 0)
+
+# Probability of interaction
+mean(samples_intx < 0)
+mean(samples_intx > 0)
+
+## Interaction by Sepsis----
+random_rr = stan_glmer(formula = death_90 ~ exposure + sepsis + ave_sepsis + intx_sepsis + intx_sepsis_between + (1 + exposure | study), 
+                       data = data_hte, 
+                       family = poisson(link="log"), 
+                       prior = normal(location = 0, scale = 5),
+                       warmup = 500, 
+                       iter = 2000,
+                       cores = 4, 
+                       seed = 123)
+random_rr
+ci95 = posterior_interval(random_rr, prob=0.95)
+exp(ci95)
+summary(random_rr)
+samples_initial = as.matrix(random_rr)
+samples_expo = samples_initial[,2] # Location of exposure
+samples_intx = samples_initial[,5] # Location of within interaction
+samples = samples_expo + samples_intx
+
+# Median and 95% credible intervals in sepsis = 1
+exp(quantile(samples, 0.025))
+exp(quantile(samples, 0.5))
+exp(quantile(samples, 0.975))
+mean(samples < 0)
+
+# Median and 95% credible intervals in sepsis = 0
+exp(quantile(samples_expo, 0.025))
+exp(quantile(samples_expo, 0.5))
+exp(quantile(samples_expo, 0.975))
+mean(samples_expo < 0)
+
+# Probability of interaction
+mean(samples_intx < 0)
+mean(samples_intx > 0)
+
+## Interaction by CKD----
+random_rr = stan_glmer(formula = death_90 ~ exposure + ckd + ave_ckd + intx_ckd + intx_ckd_between + (1 + exposure | study), 
+                       data = data_hte, 
+                       family = poisson(link="log"), 
+                       prior = normal(location = 0, scale = 5), 
+                       warmup = 500, 
+                       iter = 2000,
+                       cores = 4, 
+                       seed = 123)
+random_rr
+ci95 = posterior_interval(random_rr, prob=0.95)
+exp(ci95)
+summary(random_rr)
+samples_initial = as.matrix(random_rr)
+samples_expo = samples_initial[,2] # Location of exposure
+samples_intx = samples_initial[,5] # Location of within interaction
+
+samples = samples_expo + samples_intx
+
+# Median and 95% credible intervals in ckd = 1
+exp(quantile(samples, 0.025))
+exp(quantile(samples, 0.5))
+exp(quantile(samples, 0.975))
+mean(samples < 0)
+
+# Median and 95% credible intervals in ckd = 0
+exp(quantile(samples_expo, 0.025))
+exp(quantile(samples_expo, 0.5))
+exp(quantile(samples_expo, 0.975))
+mean(samples_expo < 0)
+
+# Probability of interaction
+mean(samples_intx < 0)
+mean(samples_intx > 0)
+
+## Interaction by Hypertension----
+random_rr = stan_glmer(formula = death_90 ~ exposure + htn + ave_htn + intx_htn + intx_htn_between + (1 + exposure | study), 
+                       data = data_hte, 
+                       family = poisson(link="log"), 
+                       prior = normal(location = 0, scale = 5), 
+                       warmup = 500, 
+                       iter = 2000,
+                       cores = 4, 
+                       seed = 123)
+random_rr
+ci95 = posterior_interval(random_rr, prob=0.95)
+exp(ci95)
+summary(random_rr)
+samples_initial = as.matrix(random_rr)
+samples_expo = samples_initial[,2] # Location of exposure
+samples_intx = samples_initial[,5] # Location of within interaction
+
+samples = samples_expo + samples_intx
+
+# Median and 95% credible intervals in htn = 1
+exp(quantile(samples, 0.025))
+exp(quantile(samples, 0.5))
+exp(quantile(samples, 0.975))
+mean(samples < 0)
+
+# Median and 95% credible intervals in htn = 0
+exp(quantile(samples_expo, 0.025))
+exp(quantile(samples_expo, 0.5))
+exp(quantile(samples_expo, 0.975))
+mean(samples_expo < 0)
+
+# Probability of interaction
+mean(samples_intx < 0)
+mean(samples_intx > 0)
+
+## Interaction by CHF----
+random_rr = stan_glmer(formula = death_90 ~ exposure + chf + ave_chf + intx_chf + intx_chf_between + (1 + exposure | study), 
+                       data = data_hte, 
+                       family = poisson(link="log"), 
+                       prior = normal(location = 0, scale = 5), 
+                       warmup = 500, 
+                       iter = 2000,
+                       cores = 4, 
+                       seed = 123)
+random_rr
+ci95 = posterior_interval(random_rr, prob=0.95)
+exp(ci95)
+summary(random_rr)
+samples_initial = as.matrix(random_rr)
+samples_expo = samples_initial[,2] # Location of exposure
+samples_intx = samples_initial[,5] # Location of within interaction
+
+samples = samples_expo + samples_intx
+
+# Median and 95% credible intervals in chf = 1
+exp(quantile(samples, 0.025))
+exp(quantile(samples, 0.5))
+exp(quantile(samples, 0.975))
+mean(samples < 0)
+
+# Median and 95% credible intervals in chf = 0
+exp(quantile(samples_expo, 0.025))
+exp(quantile(samples_expo, 0.5))
+exp(quantile(samples_expo, 0.975))
+mean(samples_expo < 0)
+
+# Probability of interaction
+mean(samples_intx < 0)
+mean(samples_intx > 0)
+
+## Interaction by APACHE----
+random_rr = stan_glmer(formula = death_90 ~ exposure + apache_cat + ave_apache + intx_apache + intx_apache_between + (1 + exposure | study), 
+                       data = data_hte, 
+                       family = poisson(link="log"), 
+                       prior = normal(location = 0, scale = 5), 
+                       warmup = 500, 
+                       iter = 2000,
+                       cores = 4, 
+                       seed = 123)
+random_rr
+ci95 = posterior_interval(random_rr, prob=0.95)
+exp(ci95)
+summary(random_rr)
+samples_initial = as.matrix(random_rr)
+samples_expo = samples_initial[,2] # Location of exposure
+samples_intx = samples_initial[,5] # Location of within interaction
+
+samples = samples_expo + samples_intx
+
+# Median and 95% credible intervals in high apache
+exp(quantile(samples, 0.025))
+exp(quantile(samples, 0.5))
+exp(quantile(samples, 0.975))
+mean(samples < 0)
+
+# Median and 95% credible intervals in low apache
+exp(quantile(samples_expo, 0.025))
+exp(quantile(samples_expo, 0.5))
+exp(quantile(samples_expo, 0.975))
+mean(samples_expo < 0)
+
+# Probability of interaction
+mean(samples_intx < 0)
+mean(samples_intx > 0)
+
+## Probability of benefit calculation if needed----
+## Inputs are point estimate (RR) and UCI (in the RR scale)
+bayesian_probability(or = 0.93, uci = 3.85)
+
+## Ad-hoc forest plot----
+data <- read.table(textConnection('
+      id           group pe       ci.l ci.u style   
+      
+"Younger than 65 years" 1     0.94 0.26 3.13 "pooled"
+"65 years of age or older" 1     0.72 0.17 2.61 "pooled"
+
+"With sepsis" 2    0.69 0.24 2.05 "pooled"
+"Without sepsis" 2    0.82 0.29 2.38 "pooled"
+
+"With CKD" 3     0.57 0.27 1.18 "pooled"
+"Without CKD" 3     0.95 0.74 1.23 "pooled"
+
+"With HTN" 4     0.73 0.25 2.49 "pooled"
+"Without HTN" 4     0.81 0.28 2.79 "pooled"
+
+"With CHF" 5     0.77 0.34 1.77 "pooled"
+"Without CHF" 5     0.83 0.38 1.88 "pooled"
+
+"High APACHE score" 6    0.89 0.24 3.72 "pooled"
+"Low APACHE score" 6   0.92 0.26 3.80 "pooled"
+
+                                  '), header=TRUE)
+data$pe <- log(data$pe)
+data$ci.l <- log(data$ci.l)
+data$ci.u <- log(data$ci.u)
+
+# setEPS()
+pdf("fig2.pdf") 
+blobbogram(data, group.labels=c('', '', '', '', '', ''),
+           id.label="HTE analysis", 
+           ci.label="Risk Ratio (95% Crl)", log.scale=TRUE, digits=3,right.label="RR (95% Crl)")
+dev.off()
+
+# Exploratory HTE---- 
+## Using a risk-based approach; by quantiles----
+## Using random intercept and Poisson distribution due to convergence issues
+data_hte$q_risk_factor <- factor(data_hte$q_risk, 
+                                 levels = 0:3,                 
+                                 labels = c("Q1", "Q2", "Q3", "Q4"))
+
+random_rr = stan_glmer(formula = death_90 ~ exposure * q_risk_factor + ave_risk + intx_risk_between + (1 | study), 
+                       data = data_hte, 
+                       family=poisson(link="log"), 
+                       prior = normal(location = 0, scale = 5),
+                       warmup = 500, 
+                       iter = 2000,
+                       cores = 4, 
+                       seed = 123)
+random_rr
+ci95 = posterior_interval(random_rr, prob=0.95)
+exp(ci95)
+summary(random_rr)
+samples_initial = as.matrix(random_rr)
+samples_expo = samples_initial[,2] # Location of exposure
+samples_intx2 = samples_initial[,8] # Location of within interaction
+samples_intx3 = samples_initial[,9] # Location of within interaction
+samples_intx4 = samples_initial[,10] # Location of within interaction
+
+samples_1 = samples_expo
+samples_2 = samples_expo + (samples_intx2)
+samples_3 = samples_expo + (samples_intx3)
+samples_4 = samples_expo + (samples_intx4)
+
+# Median and 95% credible intervals in Risk = 1
+exp(quantile(samples_1, 0.025))
+exp(quantile(samples_1, 0.5))
+exp(quantile(samples_1, 0.975))
+mean(samples_1 < 0)
+
+# Median and 95% credible intervals in Risk = 2
+exp(quantile(samples_2, 0.025))
+exp(quantile(samples_2, 0.5))
+exp(quantile(samples_2, 0.975))
+mean(samples_2 < 0)
+
+# Median and 95% credible intervals in Risk = 3
+exp(quantile(samples_3, 0.025))
+exp(quantile(samples_3, 0.5))
+exp(quantile(samples_3, 0.975))
+mean(samples_3 < 0)
+
+# Median and 95% credible intervals in Risk = 4
+exp(quantile(samples_4, 0.025))
+exp(quantile(samples_4, 0.5))
+exp(quantile(samples_4, 0.975))
+mean(samples_4 < 0)
+
+## Latent class analysis----
+## Load necessary libraries
+set.seed(123)
+formula_lca <- cbind(age_n, female_n, apache_n, cad_n, ckd_n, htn_n, chf_n, sepsis_n, rrt_n) ~ 1
+
+## LCA model
+lca_model_2 <- poLCA(formula_lca, data_lca, nclass = 2, maxiter = 2000, graphs = TRUE)
+lca_model_3 <- poLCA(formula_lca, data_lca, nclass = 3, maxiter = 2000, graphs = TRUE)
+lca_model_4 <- poLCA(formula_lca, data_lca, nclass = 4, maxiter = 2000, graphs = TRUE)
+
+cat("BIC for 2 classes: ", lca_model_2$bic, "\n")
+cat("BIC for 3 classes: ", lca_model_3$bic, "\n")
+cat("BIC for 4 classes: ", lca_model_4$bic, "\n")
+
+data_analysis_complete$cluster <- lca_model_2$predclass
+
+## Cluster description
+description <- print(CreateTableOne(
+  data = data_analysis_complete,
+  vars = c("age", "female", "apache", "cad", "chf", "ckd", "htn", "rrt", "sepsis", "study", "death_90"),
+  strata = c("cluster"), 
+  factorVars = c("female", "chf","rrt", "sepsis", "cad", "ckd", "htn", "study", "death_90"),
+  addOverall = TRUE),
+  nonnormal = c("apache"),
+  test = FALSE, 
+  smd = TRUE)
+
+## HTE by cluster
+### Does not really converge when using random slope and intercept
+### Using random intercept instead
+data_analysis_complete <- data_analysis_complete %>%
+  mutate(cluster_bin = case_when(
+    cluster==1 ~ 0, 
+    cluster==2 ~ 1)) %>%
+  mutate(intx_lca = exposure*cluster_bin) %>%
+  group_by(study) %>%
+  mutate(ave_lca = mean(cluster_bin > 0, na.rm = TRUE)) %>%
+  mutate(intx_lca_mean = exposure*ave_lca) %>%
+  ungroup()
+
+random_rr = stan_glmer(formula = death_90 ~ exposure + cluster_bin + intx_lca + ave_lca + intx_lca_mean + (1 | study), 
+                       data = data_analysis_complete, 
+                       family=binomial(link="log"), 
+                       prior = normal(location = 0, scale = 5), 
+                       warmup = 500, 
+                       iter = 2000,
+                       cores = 4, 
+                       seed = 123)
+random_rr
+?prior_summary.stanreg
+ci95 = posterior_interval(random_rr, prob=0.95)
+exp(ci95)
+summary(random_rr)
+samples_initial = as.matrix(random_rr)
+samples_initial
+
+samples_expo = samples_initial[,2] # Location of exposure
+samples_intx = samples_initial[,4] # Location of interaction
+
+samples_1 = samples_expo
+samples_2 = samples_expo + (samples_intx)
+
+# Median and 95% credible intervals in cluster = 1
+exp(quantile(samples_1, 0.025))
+exp(quantile(samples_1, 0.5))
+exp(quantile(samples_1, 0.975))
+mean(samples_1 < 0)
+
+# Median and 95% credible intervals in cluster = 2
+exp(quantile(samples_2, 0.025))
+exp(quantile(samples_2, 0.5))
+exp(quantile(samples_2, 0.975))
+mean(samples_2 < 0)
+
+# Probability of interaction
+mean(samples_intx < 0)
+mean(samples_intx > 0)
+
+## Using a risk based approach based on BART----
+outcome <- data_bart$death_90
+predictors <- data_bart[, c("age", "female", "prediction", "cad", "ckd", "chf", "rrt", "sepsis")]
+data_prediction <- data_bart[, c("age", "female", "prediction", "cad", "ckd", "chf", "rrt", "sepsis")]
+bart_fit <- pbart(x.train = predictors, y.train = outcome)
+data_bart$fitted <- bart_fit$prob.train.mean
+
+data_bart <- data_bart %>%
+  mutate(quartile = ntile(fitted,4) - 1) %>%
+  mutate(intx_quartile = exposure*quartile) %>%
+  group_by(study) %>%
+  mutate(ave_quartile = mean(quartile, na.rm = TRUE)) %>%
+  mutate(intx_quartile_between = exposure*ave_quartile) %>%
+    ungroup()
+
+data_bart$quartile_factor <- factor(data_bart$quartile, 
+                                   levels = 0:3,                 
+                                   labels = c("Q1", "Q2", "Q3", "Q4"))
+
+# Using one random intercept for study and a Poisson distribution
+random_rr = stan_glmer(formula = death_90 ~ exposure * quartile_factor + ave_quartile + intx_quartile_between + (1 | study), 
+                       data = data_bart, 
+                       family=poisson(link="log"), 
+                       prior = normal(location = 0, scale = 5),
+                       warmup = 500, 
+                       iter = 2000,
+                       cores = 4, 
+                       seed = 123)
+random_rr
+ci95 = posterior_interval(random_rr, prob=0.95)
+exp(ci95)
+summary(random_rr)
+samples_initial = as.matrix(random_rr)
+samples_expo = samples_initial[,2] # Location of exposure
+samples_intx2 = samples_initial[,8] # Location of within interaction
+samples_intx3 = samples_initial[,9] # Location of within interaction
+samples_intx4 = samples_initial[,10] # Location of within interaction
+
+samples_1 = samples_expo 
+samples_2 = samples_expo + (samples_intx2)
+samples_3 = samples_expo + (samples_intx3)
+samples_4 = samples_expo + (samples_intx4)
+
+# Median and 95% credible intervals in Risk = 1
+exp(quantile(samples_1, 0.025))
+exp(quantile(samples_1, 0.5))
+exp(quantile(samples_1, 0.975))
+mean(samples_1 < 0)
+
+# Median and 95% credible intervals in Risk = 2
+exp(quantile(samples_2, 0.025))
+exp(quantile(samples_2, 0.5))
+exp(quantile(samples_2, 0.975))
+mean(samples_2 < 0)
+
+# Median and 95% credible intervals in Risk = 3
+exp(quantile(samples_3, 0.025))
+exp(quantile(samples_3, 0.5))
+exp(quantile(samples_3, 0.975))
+mean(samples_3 < 0)
+
+# Median and 95% credible intervals in Risk = 4
+exp(quantile(samples_4, 0.025))
+exp(quantile(samples_4, 0.5))
+exp(quantile(samples_4, 0.975))
+mean(samples_4 < 0)
+
+## Using a risk based approach based on APACHE score----
+## Using quantiles, Poisson, and random intercept due to computation
+data_hte$q_apache_factor <- factor(data_hte$q_apache, 
+                                     levels = 0:3,                 
+                                     labels = c("Q1", "Q2", "Q3", "Q4"))
+
+random_rr = stan_glmer(formula = death_90 ~ exposure*q_apache_factor + ave_qapache + intx_qapache_between + (1 | study), 
+                       data = data_hte, 
+                       family = poisson(link="log"), 
+                       prior = normal(location = 0, scale = 5), 
+                       warmup = 500, 
+                       iter = 2000,
+                       cores = 4, 
+                       seed = 1235)
+random_rr
+ci95 = posterior_interval(random_rr, prob=0.95)
+exp(ci95)
+summary(random_rr)
+samples_initial = as.matrix(random_rr)
+samples_initial
+samples_expo = samples_initial[,2] # Location of exposure
+samples_intx2 = samples_initial[,8] # Location of within interaction
+samples_intx3 = samples_initial[,9] # Location of within interaction
+samples_intx4 = samples_initial[,10] # Location of within interaction
+
+samples_1 = samples_expo
+samples_2 = samples_expo + (samples_intx2)
+samples_3 = samples_expo + (samples_intx3)
+samples_4 = samples_expo + (samples_intx4)
+
+# Median and 95% credible intervals in Risk = 1
+exp(quantile(samples_1, 0.025))
+exp(quantile(samples_1, 0.5))
+exp(quantile(samples_1, 0.975))
+mean(samples_1 < 0)
+
+# Median and 95% credible intervals in Risk = 2
+exp(quantile(samples_2, 0.025))
+exp(quantile(samples_2, 0.5))
+exp(quantile(samples_2, 0.975))
+mean(samples_2 < 0)
+
+# Median and 95% credible intervals in Risk = 3
+exp(quantile(samples_3, 0.025))
+exp(quantile(samples_3, 0.5))
+exp(quantile(samples_3, 0.975))
+mean(samples_3 < 0)
+
+# Median and 95% credible intervals in Risk = 4
+exp(quantile(samples_4, 0.025))
+exp(quantile(samples_4, 0.5))
+exp(quantile(samples_4, 0.975))
+mean(samples_4 < 0)
+
+# Ad-hoc MICE and frequentist logistic models----
+## MICE; then multivariable mixed logistic model----
+md.pattern(data_analysis)
+imputed_data <- mice(data_analysis, m = 5, seed = 123)
+summary(imputed_data)
+
+fit_mice <- with(imputed_data, 
+            glmer(formula = death_90 ~ exposure + age + female + cad + 
+                  htn + ckd + chf + rrt + sepsis + (1 + exposure | study),
+                  family = binomial(link = "logit")))
+
+pooled_results <- pool(fit_mice)
+pooled_summary <- summary(pooled_results)
+print(pooled_summary)
+
+## Frequentist logistic model----
+## No imputation; as benchmark for analysis above
+logit <- glmer(
+    formula = death_90 ~ exposure + age + female + cad + htn + ckd + chf + rrt + sepsis + (1 + exposure | study),
+    family = binomial(link = "logit"),
+    data = data_analysis)
+model_summary <- summary(logit)
+model_summary
+
+coef_estimates <- model_summary$coefficients
+odds_ratio <- exp(coef_estimates[, "Estimate"])
+lower_CI <- exp(coef_estimates[, "Estimate"] - 1.96 * coef_estimates[, "Std. Error"])  # Lower CI
+upper_CI <- exp(coef_estimates[, "Estimate"] + 1.96 * coef_estimates[, "Std. Error"])  # Upper CI
+results_df <- data.frame(
+  Odds_ratio = odds_ratios,
+  Lower_CI = lower_ci,
+  Upper_CI = upper_ci)
+print(results_df)
