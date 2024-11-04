@@ -1038,13 +1038,3 @@ logit <- glmer(
     data = data_analysis)
 model_summary <- summary(logit)
 model_summary
-
-coef_estimates <- model_summary$coefficients
-odds_ratio <- exp(coef_estimates[, "Estimate"])
-lower_CI <- exp(coef_estimates[, "Estimate"] - 1.96 * coef_estimates[, "Std. Error"])  # Lower CI
-upper_CI <- exp(coef_estimates[, "Estimate"] + 1.96 * coef_estimates[, "Std. Error"])  # Upper CI
-results_df <- data.frame(
-  Odds_ratio = odds_ratios,
-  Lower_CI = lower_ci,
-  Upper_CI = upper_ci)
-print(results_df)
